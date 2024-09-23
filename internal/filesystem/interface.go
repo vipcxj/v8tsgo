@@ -1,8 +1,11 @@
 package filesystem
 
+import "io/fs"
+
 type FileSystem interface {
 	IsCaseSensitive() bool
 	Delete(path string) error
+	ReadDir(dirPath string) ([]fs.FileInfo, error)
 	ReadFile(filePath string, encoding string) (string, error)
 	WriteFile(filePath string, fileText string) error
 	Mkdir(dirPath string) error

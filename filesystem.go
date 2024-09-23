@@ -15,7 +15,6 @@ type V8FileSystemHost struct {
 	// Gets if this file system is case sensitive.
 	//   isCaseSensitive(): boolean
 	fnIsCaseSensitive *v8.FunctionTemplate
-	cbIsCaseSensitive func() (bool, error)
 
 	// Asynchronously deletes the specified file or directory.
 	//   delete(path: string): Promise<void>
@@ -23,13 +22,11 @@ type V8FileSystemHost struct {
 	// Synchronously deletes the specified file or directory.
 	//   deleteSync(path: string): void
 	fnDeleteSync *v8.FunctionTemplate
-	cbDelete     func(path string) error
 
 	// Reads all the child directories and files.
 	// Implementers should have this return the full file path.
 	//   readDirSync(dirPath: string): RuntimeDirEntry[]
 	fnReadDirSync *v8.FunctionTemplate
-	cbReadDir     func(dirPath string) ([]fs.FileInfo, error)
 
 	// Asynchronously reads a file at the specified path.
 	//	 readFile(filePath: string, encoding?: string): Promise<string>
@@ -37,7 +34,6 @@ type V8FileSystemHost struct {
 	// Synchronously reads a file at the specified path.
 	//	 readFileSync(filePath: string, encoding?: string): string
 	fnReadFileSync *v8.FunctionTemplate
-	cbReadFile     func(filePath string, encoding string) (string, error)
 
 	// Asynchronously writes a file to the file system.
 	//   writeFile(filePath: string, fileText: string): Promise<void>
@@ -45,7 +41,6 @@ type V8FileSystemHost struct {
 	// Synchronously writes a file to the file system.
 	//   writeFileSync(filePath: string, fileText: string): void
 	fnWriteFileSync *v8.FunctionTemplate
-	cbWriteFile     func(filePath string, fileText string) error
 
 	// Asynchronously creates a directory at the specified path.
 	//   mkdir(dirPath: string): Promise<void>
@@ -53,7 +48,6 @@ type V8FileSystemHost struct {
 	// Synchronously creates a directory at the specified path.
 	//   mkdirSync(dirPath: string): void
 	fnMkdirSync *v8.FunctionTemplate
-	cbMkdir     func(dirPath string) error
 
 	// Asynchronously moves a file or directory.
 	//   move(srcPath: string, destPath: string): Promise<void>
@@ -61,7 +55,6 @@ type V8FileSystemHost struct {
 	// Synchronously moves a file or directory.
 	//   moveSync(srcPath: string, destPath: string): void
 	fnMoveSync *v8.FunctionTemplate
-	cbMove     func(srcPath string, destPath string) error
 
 	// Asynchronously copies a file or directory.
 	//   copy(srcPath: string, destPath: string): Promise<void>
@@ -69,7 +62,6 @@ type V8FileSystemHost struct {
 	// Synchronously copies a file or directory.
 	//   copySync(srcPath: string, destPath: string): void
 	fnCopySync *v8.FunctionTemplate
-	cbCopy     func(srcPath string, destPath string) error
 
 	// Asynchronously checks if a file exists.
 	// Implementers should throw an `errors.FileNotFoundError` when it does not exist.
@@ -79,7 +71,6 @@ type V8FileSystemHost struct {
 	// Implementers should throw an `errors.FileNotFoundError` when it does not exist.
 	//   fileExistsSync(filePath: string): boolean
 	fnFileExistsSync *v8.FunctionTemplate
-	cbFileExists     func(filePath string) (bool, error)
 
 	// Asynchronously checks if a directory exists.
 	//   directoryExists(dirPath: string): Promise<boolean>
@@ -87,17 +78,14 @@ type V8FileSystemHost struct {
 	// Synchronously checks if a directory exists.
 	//   directoryExistsSync(dirPath: string): boolean
 	fnDirectoryExistsSync *v8.FunctionTemplate
-	cbDirectoryExists     func(dirPath string) (bool, error)
 
 	// See https://nodejs.org/api/fs.html#fs_fs_realpathsync_path_options
 	//   realpathSync(path: string): string
 	fnRealpathSync *v8.FunctionTemplate
-	cbRealpath     func(path string) (string, error)
 
 	// Gets the current directory of the environment.
 	//   getCurrentDirectory(): string
 	fnGetCurrentDirectory *v8.FunctionTemplate
-	cbGetCurrentDirectory func() (string, error)
 
 	// Uses pattern matching to find files or directories.
 	//   glob(patterns: ReadonlyArray<string>): Promise<string[]>
@@ -105,7 +93,6 @@ type V8FileSystemHost struct {
 	// Synchronously uses pattern matching to find files or directories.
 	//   globSync(patterns: ReadonlyArray<string>): string[]
 	fnGlobSync *v8.FunctionTemplate
-	cbGlob     func(patterns []string) ([]string, error)
 }
 
 func extractArg(info *v8.FunctionCallbackInfo, index int) (*v8.Value, error) {
@@ -124,6 +111,25 @@ func extractStringArg(info *v8.FunctionCallbackInfo, index int) (string, error) 
 		return value.String(), nil
 	} else {
 		return "", fmt.Errorf("the arg %d is not a string or string object", index)
+	}
+}
+
+func extractOptArg(info *v8.FunctionCallbackInfo, index int) *v8.Value {
+	if index >= len(info.Args()) {
+		return nil
+	}
+	return info.Args()[index]
+}
+
+func extractOptStringArg(info *v8.FunctionCallbackInfo, index int) (string, bool, error) {
+	value := extractOptArg(info, index)
+	if value == nil {
+		return "", false, nil
+	}
+	if value.IsString() || value.IsStringObject() {
+		return value.String(), true, nil
+	} else {
+		return "", false, fmt.Errorf("the arg %d is not a string or string object", index)
 	}
 }
 
@@ -176,7 +182,16 @@ func mustMakeValue(ctx *v8.Context, v any) *v8.Value {
 	return value
 }
 
-func NewV8FileSystem(fs filesystem.FileSystem, utils *V8Utils) (*V8FileSystemHost, error) {
+func toRuntimeDirEntry(info fs.FileInfo) map[string]any {
+	return map[string]any{
+		"name": info.Name(),
+		"isFile": info.Mode().IsRegular(),
+		"isDirectory": info.IsDir(),
+		"isSymlink": info.Mode() & fs.ModeSymlink != 0,
+	}
+}
+
+func NewV8FileSystem(fs filesystem.FileSystem, utils *V8Utils) *V8FileSystemHost {
 	ctx := utils.ctx
 	fsh := &V8FileSystemHost{
 		ctx:   ctx,
@@ -378,10 +393,269 @@ func NewV8FileSystem(fs filesystem.FileSystem, utils *V8Utils) (*V8FileSystemHos
 		}
 		return v8.Undefined(iso)
 	})
+	fsh.fnMove = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		srcPath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		destPath, err := extractStringArg(info, 1)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			err := fs.Move(srcPath, destPath)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(v8.Undefined(iso))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnMoveSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		srcPath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		destPath, err := extractStringArg(info, 1)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		err = fs.Move(srcPath, destPath)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		} else {
+			return v8.Undefined(iso)
+		}
+	})
+	fsh.fnReadDirSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		dirPath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		infoes, err := fs.ReadDir(dirPath)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		result := make([]map[string]any, 0, len(infoes))
+		for _, info := range infoes {
+			result = append(result, toRuntimeDirEntry(info))
+		}
+		resValue, err := MakeValue(info.Context(), result)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return resValue
+	})
+	fsh.fnReadFile = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		filePath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		encoding, ok, err := extractOptStringArg(info, 1)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		if !ok {
+			encoding = "utf-8"
+		}
+		go func ()  {
+			content, err := fs.ReadFile(filePath, encoding)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(mustNewValue(iso, content))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnReadFileSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		filePath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		encoding, ok, err := extractOptStringArg(info, 1)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		if !ok {
+			encoding = "utf-8"
+		}
+		content, err := fs.ReadFile(filePath, encoding)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return mustNewValue(iso, content)
+	})
+	fsh.fnRealpathSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		path, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		res, err := fs.Realpath(path)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return mustNewValue(iso, res)
+	})
+	fsh.fnWriteFile = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		filePath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		fileText, err := extractStringArg(info, 1)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func ()  {
+			err := fs.WriteFile(filePath, fileText)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(v8.Undefined(iso))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnWriteFileSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		filePath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		fileText, err := extractStringArg(info, 1)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		err = fs.WriteFile(filePath, fileText)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return v8.Undefined(iso)
+	})
+	return fsh
+}
 
-	ot := v8.NewObjectTemplate(iso)
-	v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {})
-	return nil
+func setMethod(target *v8.ObjectTemplate, name string, method *v8.FunctionTemplate) error {
+	err := target.Set(name, method, v8.ReadOnly)
+	if err != nil {
+		return fmt.Errorf("failed to set method \"%s\" on FileSystemHost, %w", name, err)
+	} else {
+		return nil
+	}
+}
+
+func (fs *V8FileSystemHost) CreateObjectTemplate() (*v8.ObjectTemplate, error) {
+	t := v8.NewObjectTemplate(fs.ctx.Isolate())
+	err := setMethod(t, "copy", fs.fnCopy)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "copySync", fs.fnCopySync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "delete", fs.fnDelete)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "deleteSync", fs.fnDeleteSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "directoryExists", fs.fnDirectoryExists)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "directoryExistsSync", fs.fnDirectoryExistsSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "fileExists", fs.fnFileExists)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "fileExistsSync", fs.fnFileExistsSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "getCurrentDirectory", fs.fnGetCurrentDirectory)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "glob", fs.fnGlob)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "globSync", fs.fnGlobSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "isCaseSensitive", fs.fnIsCaseSensitive)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "mkdir", fs.fnMkdir)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "mkdirSync", fs.fnMkdirSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "move", fs.fnMove)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "moveSync", fs.fnMoveSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "readDirSync", fs.fnReadDirSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "readFile", fs.fnReadFile)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "readFileSync", fs.fnReadFileSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "realpathSync", fs.fnRealpathSync)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "writeFile", fs.fnWriteFile)
+	if err != nil {
+		return nil, err
+	}
+	err = setMethod(t, "writeFileSync", fs.fnWriteFileSync)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func (fs *V8FileSystemHost) CreateInstance() (*v8.Value, error) {
+	t, err := fs.CreateObjectTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("unable to create object template of FileSystemHost, %w", err)
+	}
+	v, err := t.NewInstance(fs.ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unable to instance of FileSystemHost, %w", err)
+	}
+	return v.Value, nil
 }
 
 func (f *V8FileSystemHost) isCaseSensitive() bool {
