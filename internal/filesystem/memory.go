@@ -336,8 +336,6 @@ func (fs *MemoryFS) Delete(path string) error {
 	}
 }
 
-type FileInfo = fs.FileInfo
-
 func (fs *MemoryFS) ReadDir(dirPath string) ([]fs.FileInfo, error) {
 	dirPath = fs.resolve(dirPath)
 	dir, file := fs.locate(dirPath, false)

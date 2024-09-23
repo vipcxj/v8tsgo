@@ -1,6 +1,11 @@
 package filesystem
 
-import "strings"
+import (
+	"io/fs"
+	"strings"
+)
+
+type FileInfo = fs.FileInfo
 
 func cleanHeadSlash(path string) string {
 	for {

@@ -1,7 +1,9 @@
 package filesystem
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	idpath "path"
 	"path/filepath"
@@ -95,4 +97,38 @@ func (s *SandboxFS) Delete(path string) error {
 		return fmt.Errorf("unable to delete \"%s\", %w", path, err)
 	}
 	return nil
+}
+
+func (s *SandboxFS) ReadDir(dirPath string) ([]fs.FileInfo, error) {
+	hostPath, err := s.resolveOsPath(dirPath)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read dir \"%s\", %w", dirPath, err)
+	}
+	var result []fs.FileInfo
+	root := filepath.FromSlash(hostPath)
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path != root {
+				info, err := d.Info()
+				if err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						return nil
+					} else {
+						return err
+					}
+				}  else {
+					result = append(result, info)
+					return nil
+				}
+			} else {
+				return nil
+			}
+		} else {
+			return err
+		}
+	})
+	if err != nil {
+		err = fmt.Errorf("unable to read dir \"%s\", %w", dirPath, err)
+	}
+	return result, err
 }
