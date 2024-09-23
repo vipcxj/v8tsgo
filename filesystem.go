@@ -1,139 +1,17 @@
 package v8tsgo
 
 import (
-	"container/list"
-	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 
+	"github.com/vipcxj/v8tsgo/internal/filesystem"
 	v8 "rogchap.com/v8go"
 )
 
-type MemoryFS struct {
-	Root          *MemoryDirNode
-	current       *MemoryDirNode
-	caseSensitive bool
-}
+type V8FileSystemHost struct {
+	ctx   *v8.Context
+	utils *V8Utils
 
-type MemoryDirNode struct {
-	parent   *MemoryDirNode
-	name     string
-	children list.List
-	files    list.List
-}
-
-func (d *MemoryDirNode) Delete() {
-	if d.parent == nil {
-		return
-	}
-	childNode := d.parent.children.Front()
-	for {
-		if childNode != nil {
-			child := childNode.Value.(*MemoryDirNode)
-			if child == d {
-				d.parent.children.Remove(childNode)
-				return
-			}
-			childNode = childNode.Next()
-		} else {
-			break
-		}
-	}
-}
-
-func (d *MemoryDirNode) Clean() {
-	d.children.Init()
-	d.files.Init()
-}
-
-type MemoryFileNode struct {
-	parent  *MemoryDirNode
-	name    string
-	content string
-}
-
-func (f *MemoryFileNode) Delete() {
-	fileNode := f.parent.files.Front()
-	for {
-		if fileNode != nil {
-			file := fileNode.Value.(*MemoryFileNode)
-			if file == f {
-				f.parent.files.Remove(fileNode)
-				return
-			}
-			fileNode = fileNode.Next()
-		} else {
-			break
-		}
-	}
-}
-
-func NewFileNotExists(path string) error {
-	return errors.New(fmt.Sprintf("file or dir %s not exists", path))
-}
-
-func (fs *MemoryFS) locate(path string) (*MemoryDirNode, *MemoryFileNode) {
-	parts := strings.Split(path, "/")
-	node := fs.current
-	for i, part := range parts {
-		if part != "" {
-			found := false
-			childElement := node.children.Front()
-			for {
-				if childElement != nil {
-					child := childElement.Value.(*MemoryDirNode)
-					if child.name == part {
-						node = child
-						found = true
-						break
-					}
-					childElement = childElement.Next()
-				} else {
-					break
-				}
-			}
-			if !found {
-				fileNode := node.files.Front()
-				for {
-					if fileNode != nil {
-						file := fileNode.Value.(*MemoryFileNode)
-						if file.name == part && i == len(parts) - 1 {
-							return file.parent, file
-						}
-						fileNode = fileNode.Next()
-					} else {
-						break
-					}
-				}
-			}
-			if !found {
-				return nil, nil
-			}
-		}
-	}
-	return node, nil
-}
-
-func (fs *MemoryFS) Delete(path string) error {
-	dir, file := fs.locate(path)
-	if dir != nil {
-		if file != nil {
-			file.Delete()
-		} else {
-			if dir == fs.Root {
-				dir.Clean()
-			} else {
-				dir.Delete()
-			}
-		}
-		return nil
-	} else {
-		return NewFileNotExists(path)
-	}
-}
-
-type V8FileSystem struct {
 	// Gets if this file system is case sensitive.
 	//   isCaseSensitive(): boolean
 	fnIsCaseSensitive *v8.FunctionTemplate
@@ -214,7 +92,7 @@ type V8FileSystem struct {
 	// See https://nodejs.org/api/fs.html#fs_fs_realpathsync_path_options
 	//   realpathSync(path: string): string
 	fnRealpathSync *v8.FunctionTemplate
-	cbRealpathSync func(path string) (string, error)
+	cbRealpath     func(path string) (string, error)
 
 	// Gets the current directory of the environment.
 	//   getCurrentDirectory(): string
@@ -230,19 +108,290 @@ type V8FileSystem struct {
 	cbGlob     func(patterns []string) ([]string, error)
 }
 
-func NewV8FileSystem(fs fs.FS, iso *v8.Isolate) *V8FileSystem {
+func extractArg(info *v8.FunctionCallbackInfo, index int) (*v8.Value, error) {
+	if index >= len(info.Args()) {
+		return nil, fmt.Errorf("not enough arguments, expect at least %d args, but got %d args", index+1, len(info.Args()))
+	}
+	return info.Args()[index], nil
+}
 
+func extractStringArg(info *v8.FunctionCallbackInfo, index int) (string, error) {
+	value, err := extractArg(info, index)
+	if err != nil {
+		return "", err
+	}
+	if value.IsString() || value.IsStringObject() {
+		return value.String(), nil
+	} else {
+		return "", fmt.Errorf("the arg %d is not a string or string object", index)
+	}
+}
+
+func extractStringsArg(info *v8.FunctionCallbackInfo, index int) ([]string, error) {
+	value, err := extractArg(info, index)
+	if err != nil {
+		return nil, err
+	}
+	if value.IsString() || value.IsStringObject() {
+		return []string{value.String()}, nil
+	} else {
+		var out []string
+		err = ParseValue(info.Context(), value, &out)
+		if err != nil {
+			return nil, fmt.Errorf("the arg %d is not a string or string array", index)
+		}
+		return out, nil
+	}
+}
+
+func mustMakeResolver(ctx *v8.Context) *v8.PromiseResolver {
+	resolver, err := v8.NewPromiseResolver(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return resolver
+}
+
+func mustWrapError(utils *V8Utils, err error) *v8.Value {
+	ex, err := utils.WrapError(err)
+	if err != nil {
+		panic(err)
+	}
+	return ex
+}
+
+func mustNewValue(iso *v8.Isolate, v any) *v8.Value {
+	res, err := v8.NewValue(iso, v)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
+func mustMakeValue(ctx *v8.Context, v any) *v8.Value {
+	value, err := MakeValue(ctx, v)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func NewV8FileSystem(fs filesystem.FileSystem, utils *V8Utils) (*V8FileSystemHost, error) {
+	ctx := utils.ctx
+	fsh := &V8FileSystemHost{
+		ctx:   ctx,
+		utils: utils,
+	}
+	iso := ctx.Isolate()
+	fsh.fnIsCaseSensitive = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		res, err := v8.NewValue(iso, fs.IsCaseSensitive())
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		} else {
+			return res
+		}
+	})
+	fsh.fnCopy = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		srcPath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		destPath, err := extractStringArg(info, 1)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			err := fs.Copy(srcPath, destPath)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(v8.Undefined(iso))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnCopySync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		srcPath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		destPath, err := extractStringArg(info, 1)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		err = fs.Copy(srcPath, destPath)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		} else {
+			return v8.Undefined(iso)
+		}
+	})
+	fsh.fnDelete = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		path, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			err := fs.Delete(path)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(v8.Undefined(iso))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnDeleteSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		path, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		err = fs.Delete(path)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		} else {
+			return v8.Undefined(iso)
+		}
+	})
+	fsh.fnDirectoryExists = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		dirPath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			res, err := fs.DirectoryExists(dirPath)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(mustNewValue(iso, res))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnDirectoryExistsSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		dirPath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		res, err := fs.DirectoryExists(dirPath)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return mustNewValue(iso, res)
+	})
+	fsh.fnFileExists = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		filePath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			res, err := fs.FileExists(filePath)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(mustNewValue(iso, res))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnFileExistsSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		filePath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		res, err := fs.FileExists(filePath)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return mustNewValue(iso, res)
+	})
+	fsh.fnGetCurrentDirectory = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		path, err := fs.GetCurrentDirectory()
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		} else {
+			return mustNewValue(iso, path)
+		}
+	})
+	fsh.fnGlob = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		patterns, err := extractStringsArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			res, err := fs.Glob(patterns)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(mustMakeValue(ctx, res))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnGlobSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		patterns, err := extractStringsArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		res, err := fs.Glob(patterns)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return mustMakeValue(ctx, res)
+	})
+	fsh.fnMkdir = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		resolver := mustMakeResolver(ctx)
+		dirPath, err := extractStringArg(info, 0)
+		if err != nil {
+			resolver.Reject(mustWrapError(utils, err))
+			return resolver.GetPromise().Value
+		}
+		go func() {
+			err := fs.Mkdir(dirPath)
+			if err != nil {
+				resolver.Reject(mustWrapError(utils, err))
+			} else {
+				resolver.Resolve(v8.Undefined(iso))
+			}
+		}()
+		return resolver.GetPromise().Value
+	})
+	fsh.fnMkdirSync = v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		dirPath, err := extractStringArg(info, 0)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		err = fs.Mkdir(dirPath)
+		if err != nil {
+			return iso.ThrowException(mustWrapError(utils, err))
+		}
+		return v8.Undefined(iso)
+	})
+
+	ot := v8.NewObjectTemplate(iso)
+	v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {})
 	return nil
 }
 
-func (f *V8FileSystem) isCaseSensitive() bool {
+func (f *V8FileSystemHost) isCaseSensitive() bool {
 	return true
 }
 
-func (f *V8FileSystem) delete(path string) error {
+func (f *V8FileSystemHost) delete(path string) error {
 	return nil
 }
 
-func (f *V8FileSystem) readDir(dirPath string) ([]fs.File, error) {
+func (f *V8FileSystemHost) readDir(dirPath string) ([]fs.File, error) {
 	return nil, nil
 }
