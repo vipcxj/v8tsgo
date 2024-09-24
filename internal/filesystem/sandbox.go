@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"io/ioutil"
 	"os"
 	idpath "path"
 	"path/filepath"
@@ -131,4 +132,92 @@ func (s *SandboxFS) ReadDir(dirPath string) ([]fs.FileInfo, error) {
 		err = fmt.Errorf("unable to read dir \"%s\", %w", dirPath, err)
 	}
 	return result, err
+}
+
+func (s *SandboxFS) ReadFile(filePath string, encoding string) (string, error) {
+	hostPath, err := s.resolveOsPath(filePath)
+	if err != nil {
+		return "", fmt.Errorf("unable to read file \"%s\", %w", filePath, err)
+	}
+	if strings.ToLower(encoding) != "utf8" && strings.ToLower(encoding) != "utf-8" {
+		return "", fmt.Errorf("unable to read file \"%s\", only utf-8 is supported", filePath)
+	}
+	bytes, err := os.ReadFile(filepath.FromSlash(hostPath))
+	if err != nil {
+		return "", fmt.Errorf("unable to read file \"%s\", %w", filePath, err)
+	}
+	return string(bytes), nil
+}
+
+func (s *SandboxFS) WriteFile(filePath string, fileText string) error {
+	hostPath, err := s.resolveOsPath(filePath)
+	if err != nil {
+		return fmt.Errorf("unable to write file \"%s\", %w", filePath, err)
+	}
+	err = os.WriteFile(filepath.FromSlash(hostPath), []byte(fileText), 0770)
+	if err != nil {
+		return fmt.Errorf("unable to write file \"%s\", %w", filePath, err)
+	}
+	return nil
+}
+
+
+func (s *SandboxFS) Mkdir(dirPath string) error {
+	hostPath, err := s.resolveOsPath(dirPath)
+	if err != nil {
+		return fmt.Errorf("unable to make dir \"%s\", %w", dirPath, err)
+	}
+	err = os.MkdirAll(filepath.FromSlash(hostPath), 0770)
+	if err != nil {
+		return fmt.Errorf("unable to make dir \"%s\", %w", dirPath, err)
+	}
+	return nil
+}
+
+func isDir(osPath string) bool {
+	info, err := os.Stat(osPath)
+	if os.IsNotExist(err) {
+		return false
+	} else if err != nil {
+		panic(fmt.Errorf("unable to determine whether path \"%s\" is a directory, %w", osPath, err))
+	}
+	return info.IsDir()
+}
+
+func (s *SandboxFS) Move(srcPath string, destPath string) error {
+	hostSrcPath, err := s.resolveOsPath(srcPath)
+	if err != nil {
+		return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", %w", srcPath, destPath, err)
+	}
+	hostDestPath, err := s.resolveOsPath(destPath)
+	if err != nil {
+		return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", %w", srcPath, destPath, err)
+	}
+	osSrcPath := filepath.FromSlash(hostSrcPath)
+	osDestPath := filepath.FromSlash(hostDestPath)
+	srcInfo, err := os.Stat(osSrcPath)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", %w", srcPath, destPath, err)
+	}
+	destExist := true
+	destInfo, err := os.Stat(osDestPath)
+	if os.IsNotExist(err) {
+		destExist = false
+	}
+	if srcInfo.IsDir() {
+		if !destExist {
+			err = os.Rename(osSrcPath, osDestPath)
+		} else if destInfo.IsDir() {
+			entries, err := os.ReadDir(osSrcPath)
+
+		} else {
+			return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", dest path is not a dir but src path is a dir", srcPath, destPath)
+		}
+	} else {
+		if destInfo.IsDir() {
+			
+		} else {
+
+		}
+	}
 }
