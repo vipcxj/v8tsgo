@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	idpath "path"
 	"path/filepath"
@@ -195,29 +194,13 @@ func (s *SandboxFS) Move(srcPath string, destPath string) error {
 	}
 	osSrcPath := filepath.FromSlash(hostSrcPath)
 	osDestPath := filepath.FromSlash(hostDestPath)
-	srcInfo, err := os.Stat(osSrcPath)
+	_, err = os.Stat(osSrcPath)
 	if os.IsNotExist(err) {
 		return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", %w", srcPath, destPath, err)
 	}
-	destExist := true
-	destInfo, err := os.Stat(osDestPath)
-	if os.IsNotExist(err) {
-		destExist = false
+	err = os.Rename(osSrcPath, osDestPath)
+	if err != nil {
+		return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", %w", srcPath, destPath, err)
 	}
-	if srcInfo.IsDir() {
-		if !destExist {
-			err = os.Rename(osSrcPath, osDestPath)
-		} else if destInfo.IsDir() {
-			entries, err := os.ReadDir(osSrcPath)
-
-		} else {
-			return fmt.Errorf("unable to move source path \"%s\" to dest path \"%s\", dest path is not a dir but src path is a dir", srcPath, destPath)
-		}
-	} else {
-		if destInfo.IsDir() {
-			
-		} else {
-
-		}
-	}
+	return nil
 }
