@@ -173,16 +173,6 @@ func (s *SandboxFS) Mkdir(dirPath string) error {
 	return nil
 }
 
-func isDir(osPath string) bool {
-	info, err := os.Stat(osPath)
-	if os.IsNotExist(err) {
-		return false
-	} else if err != nil {
-		panic(fmt.Errorf("unable to determine whether path \"%s\" is a directory, %w", osPath, err))
-	}
-	return info.IsDir()
-}
-
 func (s *SandboxFS) Move(srcPath string, destPath string) error {
 	hostSrcPath, err := s.resolveOsPath(srcPath)
 	if err != nil {
